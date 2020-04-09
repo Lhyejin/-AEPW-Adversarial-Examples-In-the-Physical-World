@@ -1,8 +1,9 @@
 # Adversarial Examples In the Physical World
 Implementation based Adversarial Examples in the Physical World
 
-TODO: readme 정리하기
-TODO: visualize 통합하기
+- [ ] readme 정리하기
+
+- [ ] visualize 통합하기
 
 
 ## Basic Iteration Method result
