@@ -8,7 +8,9 @@ Implementation based Adversarial Examples in the Physical World
 
 ## Basic Iteration Method result
 model training epoch: 20 (default training)
+
 epsilon : 0.05
+
 number of adversarial example iteration : 15
 
 Testset Accuracy: 8758/ 10000 (87.58%)
