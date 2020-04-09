@@ -1,11 +1,11 @@
 import argparse
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.autograd import Variable
 import torch.optim as optim
 from torchvision import datasets, transforms
-import network
+from network import GoogLeNet
+from adversarial_attack import fgsm, basic_iteration, least_likely_class
 
 
 # Training phase
@@ -30,58 +30,57 @@ def train(args, model, device, train_loader, optimizer):
                            100. * batch_idx / len(train_loader), loss.item()))
         # Save the model checkpoint
         if args.save_model and epoch % 10 == 0:
-            torch.save(model.state_dict(), 'model/least_likely_model-{}.ckpt'.format(epoch))
+            torch.save(model.state_dict(), 'model/basic_iter_model-{}.ckpt'.format(epoch))
 
+ 
 # Test phase
 def test(args, model, device, test_loader):
     model.eval()
     
-    if args.model_parameter is not None:
-        model.load_state_dict(torch.load(args.model_parameter))
+    if args.model is not None:
+        model.load_state_dict(torch.load(args.model))
     
     correct = 0
     adv_correct = 0
     misclassified = 0
     
     criterion = nn.CrossEntropyLoss()
-    # image value [0, 1] args.epsilon * 255
-    # number of iteration
-    num_iter = int(min(args.epsilon*255 +4, 1.25*args.epsilon*255))
-    print('number of adversarial example iteration :', num_iter)
+    
     for idx, (images, targets) in enumerate(test_loader):
         images = Variable(images.to(device), requires_grad=True)
         targets = Variable(targets.to(device))
         
-        # least-likely class method
         origin_output = model(images)
-        _, targets_LL = torch.min(origin_output.data, 1)
-         
-        # X_0 adv images
-        adv_images = images
-        for i in range(num_iter):
-            outputs = model(adv_images)
-            loss = criterion(outputs, targets_LL)
-            loss.backward()
-            
-            # Generate perturbation
-            grad_j = torch.sign(adv_images.grad.data)
-            next_adv_images = adv_images - args.epsilon * grad_j
-            lower_adv_images = torch.max(torch.tensor(0.).to(device), torch.max(adv_images-args.epsilon, next_adv_images))
-            adv_images = torch.min(torch.tensor(1.).to(device), torch.min(adv_images+args.epsilon, lower_adv_images))
-            adv_images = Variable(adv_images.to(device), requires_grad=True)
+
+        # Generate Perturbation
+        # Iteration Least-Likely Class Method
+        if args.attack == 'll_class':
+            _, ll_targets = torch.min(origin_output.data, 1)
+            num_iter, adv_images = least_likely_class(args, model, device, images, ll_targets, criterion)
+        # Basic Iteration Method
+        elif args.attack == 'basic_iter':
+            num_iter, adv_images = basic_iteration(args, model, device, images, targets, criterion)
+        else: # FGSM
+            adv_images = fgsm(args, model, device, images, targets, criterion)
+
         # test adversarial example
-        adv_output = model(Variable(adv_images))
+        adv_output = model(adv_images)
         
+        # Prediction 
         _, preds = torch.max(origin_output.data, 1)
         _, adv_preds = torch.max(adv_output.data, 1)
         
         correct += (preds == targets).sum().item()
         adv_correct += (adv_preds == targets).sum().item()
         misclassified += (preds != adv_preds).sum().item()
-        current_test_size = args.test_batch_size*(idx+1)        
-        print('\n Epoch {} : correct({}/{}) , adversarial correct({}/{}), misclassify({}/{})\n'.format(
+        current_test_size = args.test_batch_size*(idx+1)
+
+        # if you want to see intermidiate results, uncomment print
+        
+        print('\n Epoch {} : correct({}/{}) , adversarial correct({}/{}), misclassify({}/{})'.format(
             idx, correct, current_test_size, adv_correct, current_test_size, misclassified, current_test_size
         ))
+        
         
     print('\n Testset Accuracy: {}/ {} ({:.2f}%)\n'.format(
             correct, len(test_loader.dataset),
@@ -92,12 +91,15 @@ def test(args, model, device, test_loader):
             100. * adv_correct / len(test_loader.dataset)
         ))
     print('\n misclassified examples : {}/ {}\n'.format(
-            misclassified, len(test_loader. dataset)
+            misclassified, len(test_loader.dataset)
         ))
-
+    
+    if args.attack == 'basic_iter' or args.attack == 'll_class':
+        print('Number of adversarial example iteration :', num_iter)
+        
 
 def main():
-    parser = argparse.ArgumentParser(description='PyTorch CIFAR-10 Example')
+    parser = argparse.ArgumentParser(description='PyTorch White-Box Attack')
     parser.add_argument('--batch-size', type=int, default=100, metavar='N',
                         help='input batch size for training (default: 100)')
     parser.add_argument('--test-batch-size', type=int, default=100, metavar='N',
@@ -112,21 +114,23 @@ def main():
                         help='disables CUDA training')
     parser.add_argument('--log-interval', type=int, default=100, metavar='N',
                         help='how many batches to wait before logging training status')
-    parser.add_argument('--epsilon', type=float, default=0.05)
+    parser.add_argument('--epsilon', type=float, default=0.05,
+                        help='epsilon of adversarial attack')
     parser.add_argument('--dataset-normalize', action='store_true' , default=False,
                         help='input whether normalize or not (default: False)')
     parser.add_argument('--test-mode', action='store_true', default=False,
                         help='input whether training or not (default: False')
-    parser.add_argument('--model-parameter', type=str, default=None,
+    parser.add_argument('--model', type=str, default=None,
                         help='if test mode, input model parameter path')
     parser.add_argument('--save-model', action='store_true', default=False,
                         help='For Saving the current Model')
-    
+    parser.add_argument('--attack', type=str, default='fgsm',
+                        help='Choose adversarial attack: fgsm, basic_iter, ll_class')    
+
     args = parser.parse_args()
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
-    device = torch.device("cuda:1" if use_cuda else "cpu")
-
+    device = torch.device("cuda" if use_cuda else "cpu")
     transformation = transforms.ToTensor()
     # Dataset normalize
     if args.dataset_normalize:
@@ -134,15 +138,15 @@ def main():
                                              transforms.Normalize((0.1307,), (0.3081,))])
 
     train_loader = torch.utils.data.DataLoader(
-      datasets.CIFAR10('./data', train=True, download=True,
+      datasets.CIFAR10('../data', train=True, download=True,
                         transform=transformation),
       batch_size=args.batch_size, shuffle=True)
     test_loader = torch.utils.data.DataLoader(
-      datasets.CIFAR10('./data', train=False, download=True,
+      datasets.CIFAR10('../data', train=False, download=True,
                         transform=transformation),
       batch_size=args.test_batch_size, shuffle=True)
   
-    model = network.GoogLeNet().to(device)
+    model = GoogLeNet().to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     
     if args.test_mode is False:
@@ -151,6 +155,6 @@ def main():
     else:
         test(args, model, device, test_loader)
 
-
 if __name__ == '__main__':
     main()            
+
